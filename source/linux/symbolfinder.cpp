@@ -10,39 +10,44 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define PAGE_SIZE 4096
-#define PAGE_ALIGN_UP( x ) ( ( x + PAGE_SIZE - 1 ) & ~( PAGE_SIZE - 1 ) )
-
 struct DynLibInfo
 {
-	void *baseAddress;
-	size_t memorySize;
+	uintptr_t baseAddress;
+	const ElfW( Phdr ) *phdr;
+	uint16_t phdrCount;
 };
 
 void *SymbolFinder::FindPattern( const void *handle, const uint8_t *pattern, size_t len, const void *start )
 {
 	DynLibInfo lib;
-	memset( &lib, 0, sizeof( DynLibInfo ) );
 	if( !GetLibraryInfo( handle, lib ) )
 		return nullptr;
 
-	uint8_t *ptr = reinterpret_cast<uint8_t *>( start > lib.baseAddress ? const_cast<void *>( start ) : lib.baseAddress );
-	uint8_t *end = reinterpret_cast<uint8_t *>( lib.baseAddress ) + lib.memorySize - len;
-	bool found = true;
-	while( ptr < end )
+	for( uint16_t s = 0; s < lib.phdrCount; ++s )
 	{
-		for( size_t i = 0; i < len; ++i )
-			if( pattern[i] != '\x2A' && pattern[i] != ptr[i] )
-			{
-				found = false;
-				break;
-			}
+		const ElfW( Phdr ) &hdr = lib.phdr[s];
+		if( hdr.p_type != PT_LOAD || ( hdr.p_flags & PF_X ) == 0 || hdr.p_filesz < len )
+			continue;
 
-		if( found )
-			return ptr;
+		uint8_t *segment = reinterpret_cast<uint8_t *>( lib.baseAddress + hdr.p_vaddr );
+		uint8_t *ptr = start > segment ? reinterpret_cast<uint8_t *>( const_cast<void *>( start ) ) : segment;
+		uint8_t *end = segment + hdr.p_filesz - len;
+		bool found = true;
+		while( ptr <= end )
+		{
+			for( size_t i = 0; i < len; ++i )
+				if( pattern[i] != '\x2A' && pattern[i] != ptr[i] )
+				{
+					found = false;
+					break;
+				}
 
-		++ptr;
-		found = true;
+			if( found )
+				return ptr;
+
+			++ptr;
+			found = true;
+		}
 	}
 
 	return nullptr;
@@ -80,6 +85,9 @@ void *SymbolFinder::FindSymbol( const void *handle, const char *symbol )
 	
 #endif
 	
+	if( handle == nullptr )
+		return nullptr;
+
 	const struct link_map *dlmap = reinterpret_cast<const struct link_map *>( handle );
 	SymbolTable *libtable = nullptr;
 	const auto it = symbolTables.find( dlmap->l_addr );
@@ -233,18 +241,8 @@ bool SymbolFinder::GetLibraryInfo( const void *handle, DynLibInfo &lib )
 	if( file->e_type != ET_DYN )
 		return false;
 
-	uint16_t phdrCount = file->e_phnum;
-	Elf_Phdr *phdr = reinterpret_cast<Elf_Phdr *>( baseAddr + file->e_phoff );
-	for( uint16_t i = 0; i < phdrCount; ++i )
-	{
-		Elf_Phdr &hdr = phdr[i];
-		if( hdr.p_type == PT_LOAD && hdr.p_flags == ( PF_X | PF_R ) )
-		{
-			lib.memorySize = PAGE_ALIGN_UP( hdr.p_filesz );
-			break;
-		}
-	}
-
-	lib.baseAddress = reinterpret_cast<void *>( baseAddr );
+	lib.baseAddress = baseAddr;
+	lib.phdr = reinterpret_cast<const Elf_Phdr *>( baseAddr + file->e_phoff );
+	lib.phdrCount = file->e_phnum;
 	return true;
 }
